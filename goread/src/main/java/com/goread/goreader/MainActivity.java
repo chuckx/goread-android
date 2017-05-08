@@ -65,6 +65,7 @@ public class MainActivity extends ListActivity {
     private int pos = -1;
     private SharedPreferences p;
     private String authToken = null;
+    private boolean tokenRefreshed = false;
     private MenuItem refreshMenuItem = null;
     private boolean refreshing = false;
 
@@ -242,62 +243,86 @@ public class MainActivity extends ListActivity {
         }
     }
 
+    private class GetAuthCookieTask extends AsyncTask<Void, Void, Void> {
+        private Context context;
+
+        public GetAuthCookieTask(Context context) {
+            this.context = context;
+        }
+
+        private void getAuthToken() {
+            try {
+                String accountName = p.getString(GoRead.P_ACCOUNT, "");
+                authToken = GoogleAuthUtil.getToken(context, accountName, GoRead.APP_ENGINE_SCOPE);
+                Log.e(GoRead.TAG, "auth: " + authToken);
+            } catch (UserRecoverableAuthException e) {
+                Intent intent = e.getIntent();
+                startActivityForResult(intent, GoRead.PICK_ACCOUNT_REQUEST);
+            } catch (Exception e) {
+                Log.e(GoRead.TAG, "gac", e);
+            }
+        }
+
+        @Override
+        protected Void doInBackground(Void... voids) {
+            this.getAuthToken();
+            return null;
+        }
+
+        @Override
+        protected void onPostExecute(Void v) {
+            if (authToken == null) {
+                return;
+            }
+            try {
+                URL url = new URL(GoRead.get(context).GOREAD_URL + "/_ah/login?continue=" + URLEncoder.encode(GoRead.get(context).GOREAD_URL, "UTF-8") + "&auth=" + URLEncoder.encode(authToken, "UTF-8"));
+                GoRead.addReq(context, new StringRequest(Request.Method.GET, url.toString(), new Response.Listener<String>() {
+                    @Override
+                    public void onResponse(String s) {
+                        Log.e(GoRead.TAG, "resp");
+                        tokenRefreshed = false;
+                        GoRead.get(context).loginDone = true;
+                        fetchListFeeds();
+                    }
+                }, new Response.ErrorListener() {
+                    @Override
+                    public void onErrorResponse(VolleyError volleyError) {
+                        if (!tokenRefreshed) {
+                            GoogleAuthUtil.invalidateToken(context, authToken);
+                            getAuthToken();
+                            tokenRefreshed = true;
+                            new GetAuthCookieTask(context).execute();
+                            return;
+                        }
+                        Log.e(GoRead.TAG, volleyError.toString());
+                        String errorMessage = volleyError.getMessage();
+                        if (errorMessage.equals("")) {
+                            errorMessage = volleyError.toString();
+                        }
+                        Toast toast = Toast.makeText(context, errorMessage, Toast.LENGTH_LONG);
+                        toast.show();
+                        refreshing = false;
+                        setRefreshing();
+                    }
+                }
+                ));
+            } catch (Exception e) {
+                Toast toast = Toast.makeText(context, "Error: could not log in; prefs reset", Toast.LENGTH_LONG);
+                toast.show();
+                SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(context);
+                sp.edit().clear().commit();
+                PreferenceManager.setDefaultValues(context, R.xml.preferences, true);
+                GoRead.get(context).GOREAD_URL = sp.getString(SettingsFragment.ServerDomain, getString(R.string.default_server_domain));
+                pickAccount();
+                Log.e(GoRead.TAG, "gac ope", e);
+            }
+        }
+    }
+
     protected void getAuthCookie() {
         Log.e(GoRead.TAG, "getAuthCookie");
         final Context c = this;
-        AsyncTask<Void, Void, Void> task = new AsyncTask<Void, Void, Void>() {
-            @Override
-            protected Void doInBackground(Void... voids) {
-                try {
-                    String accountName = p.getString(GoRead.P_ACCOUNT, "");
-                    authToken = GoogleAuthUtil.getToken(c, accountName, GoRead.APP_ENGINE_SCOPE);
-                    Log.e(GoRead.TAG, "auth: " + authToken);
-                } catch (UserRecoverableAuthException e) {
-                    Intent intent = e.getIntent();
-                    startActivityForResult(intent, GoRead.PICK_ACCOUNT_REQUEST);
-                } catch (Exception e) {
-                    Log.e(GoRead.TAG, "gac", e);
-                }
-                return null;
-            }
-
-            @Override
-            protected void onPostExecute(Void v) {
-                if (authToken == null) {
-                    return;
-                }
-                try {
-                    URL url = new URL(GoRead.get(c).GOREAD_URL + "/_ah/login" + "?continue=" + URLEncoder.encode(GoRead.get(c).GOREAD_URL, "UTF-8") + "&auth=" + URLEncoder.encode(authToken, "UTF-8"));
-                    GoRead.addReq(c, new StringRequest(Request.Method.GET, url.toString(), new Response.Listener<String>() {
-                        @Override
-                        public void onResponse(String s) {
-                            Log.e(GoRead.TAG, "resp");
-                            GoRead.get(c).loginDone = true;
-                            fetchListFeeds();
-                        }
-                    }, new Response.ErrorListener() {
-                        @Override
-                        public void onErrorResponse(VolleyError volleyError) {
-                            Log.e(GoRead.TAG, volleyError.toString());
-                            Toast toast = Toast.makeText(c, volleyError.getMessage(), Toast.LENGTH_LONG);
-                            toast.show();
-                            refreshing = false;
-                            setRefreshing();
-                        }
-                    }
-                    ));
-                } catch (Exception e) {
-                    Toast toast = Toast.makeText(c, "Error: could not log in; prefs reset", Toast.LENGTH_LONG);
-                    toast.show();
-                    SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(c);
-                    sp.edit().clear().commit();
-                    PreferenceManager.setDefaultValues(c, R.xml.preferences, true);
-                    GoRead.get(c).GOREAD_URL = sp.getString(SettingsFragment.ServerDomain, getString(R.string.default_server_domain));
-                    pickAccount();
-                    Log.e(GoRead.TAG, "gac ope", e);
-                }
-            }
-        };
+        GetAuthCookieTask task = new GetAuthCookieTask(c);
         task.execute();
     }
 
